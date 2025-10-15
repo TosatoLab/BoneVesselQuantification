@@ -1,0 +1,19 @@
+python bm_vessel_analysis.py \
+  --input path/to/images_or_image.tif \
+  --output results/ \
+  --pixel-size-um 0.5 \
+  --min-seg-len-um 10 \
+  --thresh-method otsu
+
+# with Cellpose segmentation (when signal is variable)
+python bm_vessel_analysis.py \
+  --input path/to/folder \
+  --output results_cellpose \
+  --use-cellpose --cellpose-model cyto2 \
+  --pixel-size-um 0.5
+
+# attempt vessel_metrics-based diameter refinement 
+python bm_vessel_analysis.py \
+  --input path/to/folder \
+  --output results_vm \
+  --use-vessel-metrics
