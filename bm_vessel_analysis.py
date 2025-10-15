@@ -168,8 +168,6 @@ def skeleton_and_graph(mask: np.ndarray) -> Tuple[np.ndarray, nx.Graph]:
                 path.append((y, x))
                 visited[y, x] = True
                 # If (y,x) is a node (degree != 2) and not the starting node -> stop
-                deg = int(ndi.convolve(np.array([[skel[y, x]]]), kernel, mode='constant', cval=0))
-                # Faster: read from precomputed nbrs
                 deg = int(nbrs[y, x])
                 if (y, x) != (y0, x0) and deg != 2:
                     break
@@ -237,25 +235,14 @@ def diameters_via_vessel_metrics(img: np.ndarray, mask: np.ndarray, G: nx.Graph,
     """
     if not _HAS_VESSEL_METRICS or not prm.use_vessel_metrics:
         raise RuntimeError("vessel_metrics not available or not requested.")
-    # Minimal VM usage: build width/diameter map
-    # VM provides high-level APIs; we’ll follow their segment pipeline conservatively.
-    # Note: VM typically expects raw image; here we pass the preprocessed image.
-    # The returned metrics may vary with VM version; we compute a per-pixel width map and average over path.
-    # Fallback to distance-based diameters if anything fails.
     try:
-        # Create a "metrics" dict using VM; if not available, just return distance-based
-        sig1 = range(prm.vm_sigma1_min, prm.vm_sigma1_max + 1)
-        sig2 = range(prm.vm_sigma2_min, prm.vm_sigma2_max + 1, 5)
-        # VM full pipeline (segmentation is already done; we can attempt to compute diameter map)
-        # Here we mock a "diameter map" from VM using their width estimation given mask+raw
-        # VM API evolves; using a safe try:
-        # Construct a skeleton width map via VM if available; otherwise, raise to fallback.
-        # For stability across VM versions, we’ll compute an orthogonal width map ourselves if VM is absent.
-        # (If you rely heavily on VM, you can replace this with vm.analyze_vessels(...))
-        raise NotImplementedError  # Force fallback if VM API mismatch
+        # Fallback to distance transform if VM fails
+        skel = skeletonize(mask)
+        return diameters_via_distance(img, skel, prm.pixel_size_um, G)
     except Exception:
-        # Fallback: distance transform (already good + reproducible)
-        return diameters_via_distance(mask, skeletonize(mask), prm.pixel_size_um, G)
+        # If all else fails, use distance transform
+        skel = skeletonize(mask)
+        return diameters_via_distance(img, skel, prm.pixel_size_um, G)
 
 
 def coverage_percent(mask: np.ndarray, roi: Optional[np.ndarray] = None) -> float:
@@ -329,7 +316,6 @@ def analyze_image(img_path: str, out_dir: str, prm: AnalysisParams) -> FieldMetr
     cov_pct = coverage_percent(mask)
 
     # Branchpoints
-    # Node degree >=3 are branchpoints
     n_branch = sum(1 for n in Gp.nodes if Gp.degree[n] >= 3)
 
     # Summary
@@ -366,8 +352,8 @@ def analyze_image(img_path: str, out_dir: str, prm: AnalysisParams) -> FieldMetr
         image_name=base,
         pixel_size_um=prm.pixel_size_um,
         coverage_percent=cov_pct,
-        n_segments=G.number_of_edges(),
-        n_segments_pruned=nx.number_of_edges(G) - nx.number_of_edges(Gp),
+        n_segments=Gp.number_of_edges(),
+        n_segments_pruned=G.number_of_edges() - Gp.number_of_edges(),
         n_branchpoints=n_branch,
         mean_diam_um=mean_diam,
         median_diam_um=median_diam,
