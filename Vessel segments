@@ -1,0 +1,159 @@
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+import networkx as nx
+from skimage import io, color, filters, morphology, exposure
+from skimage.morphology import disk
+from scipy import ndimage as ndi
+import os
+from glob import glob
+
+# Choose which dataset to process (set to 'ko' or 'wt')
+dataset = 'ko'  # Change this to 'ko' or 'wt'
+
+if dataset == 'ko':
+    folder_path = r".\Bone\KO\25"
+    print("Processing KO samples...\n")
+elif dataset == 'wt':
+    folder_path = r".\Bone\WT\25"
+    print("Processing WT samples...\n")
+else:
+    raise ValueError("dataset must be 'ko' or 'wt'")
+
+# Fixed length threshold (branches shorter than this will be filtered out)
+min_branch_length = 30  # Change this value if needed 
+
+# Get all .tif files
+tif_files = sorted(glob(os.path.join(folder_path, "*.tif")))
+
+print(f"Found {len(tif_files)} files to process")
+print(f"Using fixed minimum branch length: {min_branch_length}px\n")
+
+# List to store results
+results = []
+
+for file_path in tif_files:
+    file_name = os.path.splitext(os.path.basename(file_path))[0]
+    
+    # Extract Z number from filename
+    z_num = None
+    for match in range(1, 100):
+        if f"Z{match:03d}" in file_path:
+            z_num = match
+            break
+    
+    if z_num is None:
+        print(f"Skipping {file_name} (Z number not found)")
+        continue
+    
+    print(f"Processing: {file_name}")
+    
+    # ---------- Load & preprocess ----------
+    img_rgb = io.imread(file_path)
+    img_gray = color.rgb2gray(img_rgb) if img_rgb.ndim == 3 else img_rgb
+    
+    # Contrast enhance + smoothing
+    img_eq = exposure.equalize_adapthist(img_gray, clip_limit=0.01)
+    img_blur = cv2.GaussianBlur((img_eq * 255).astype(np.uint8), (5, 5), 0)
+    
+    # Threshold (Otsu)
+    _, otsu = cv2.threshold(img_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    binary = otsu > 0
+    
+    # Morphological smoothing
+    binary = morphology.binary_closing(binary, footprint=disk(2))
+    binary = morphology.remove_small_objects(binary, 200)
+    binary = morphology.remove_small_holes(binary, 200)
+    
+    # Skeletonize
+    skeleton = morphology.skeletonize(binary)
+    
+    # ---------- Build graph ----------
+    coords = np.transpose(np.nonzero(skeleton))
+    G = nx.Graph()
+    for y, x in coords:
+        G.add_node((y, x))
+    H, W = skeleton.shape
+    for y, x in coords:
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dy == 0 and dx == 0:
+                    continue
+                ny, nx_ = y + dy, x + dx
+                if 0 <= ny < H and 0 <= nx_ < W and skeleton[ny, nx_]:
+                    G.add_edge((y, x), (ny, nx_))
+    
+    # ---------- Identify key nodes ----------
+    deg = dict(G.degree())
+    endpoints = {n for n, d in deg.items() if d == 1}
+    junctions = {n for n, d in deg.items() if d > 2}
+    key_nodes = endpoints | junctions
+    
+    # ---------- Extract branches ----------
+    def extract_branches(G, key_nodes):
+        branches = []
+        visited = set()
+        for n in key_nodes:
+            for nbr in G.neighbors(n):
+                edge = tuple(sorted((n, nbr)))
+                if edge in visited:
+                    continue
+                path = [n, nbr]
+                visited.add(edge)
+                prev = n
+                curr = nbr
+                while curr not in key_nodes:
+                    nexts = [x for x in G.neighbors(curr) if x != prev]
+                    if not nexts:
+                        break
+                    nxt = nexts[0]
+                    path.append(nxt)
+                    visited.add(tuple(sorted((curr, nxt))))
+                    prev, curr = curr, nxt
+                branches.append(path)
+        return branches
+    
+    raw_branches = extract_branches(G, key_nodes)
+    
+    # ---------- Filter by fixed length threshold ----------
+    lengths = np.array([len(b) for b in raw_branches])
+    keep_idx = np.where(lengths >= min_branch_length)[0]
+    kept_branches = [raw_branches[i] for i in keep_idx]
+    final_count = len(kept_branches)
+    
+    # ---------- Annotate ----------
+    canvas = cv2.cvtColor((img_rgb * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+    
+    for i, branch in enumerate(kept_branches, start=1):
+        pts = np.array(branch)
+        y, x = np.mean(pts, axis=0).astype(int)
+        cv2.putText(canvas, str(i), (x, y), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.25, (255, 0, 0), 1, cv2.LINE_AA)
+    
+    canvas_rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+    
+    # ---------- Save ----------
+    output_filename = f"{file_name}_segment_{final_count}.png"
+    output_path = os.path.join(folder_path, output_filename)
+    cv2.imwrite(output_path, cv2.cvtColor(canvas_rgb, cv2.COLOR_RGB2BGR))
+    
+    print(f"  ✓ Saved: {output_filename} ({final_count} segments, min length ≥ {min_branch_length}px)\n")
+    
+    # Record results
+    results.append({
+        'Filename': file_name,
+        'Z_Number': z_num,
+        'Branch_Count': final_count,
+        'Min_Length_px': min_branch_length
+    })
+
+# Save results to CSV
+import pandas as pd
+csv_filename = f"segment_results_{dataset.upper()}_fixed_{min_branch_length}px.csv"
+csv_path = os.path.join(folder_path, csv_filename)
+df = pd.DataFrame(results)
+df.to_csv(csv_path, index=False)
+
+print(f"\nBatch processing complete!")
+print(f"Results saved to: {csv_path}\n")
+print(df.to_string(index=False))
